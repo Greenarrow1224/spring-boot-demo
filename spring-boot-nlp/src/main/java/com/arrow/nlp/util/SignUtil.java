@@ -10,8 +10,11 @@ import org.springframework.util.CollectionUtils;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
+import java.security.*;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.X509EncodedKeySpec;
 import java.text.StringCharacterIterator;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -31,8 +34,21 @@ public class SignUtil {
     private static final String SHA1 = "SHA1";
     private static final String MD5 = "MD5";
 
+    // 后期优化到 Nacos 配置文件中
+    private static final String TOKEN = "c5f8ccdc5b9a9454";
+    // 动态实体密钥
+    private static final String ACCOUNT_KEY = "3f7f7a53b8504eddb411dda18c5c5759";
+    // 动态实体密钥
+    private static final String NAMESPACE = "OS14956178533";
 
-    private static final String TOKEN = "1a2d7562969ab7f7";
+
+
+    private static final String UPLOAD_URL = "https://openapi.xfyun.cn/v2/aiui/entity/upload-resource";
+    private static final String CHECK_URL = "https://openapi.xfyun.cn/v2/aiui/entity/check-resource";
+    private static final String X_NONCE = "12";
+    private static final String APPID = "";
+    private static final String X_NAMESPACE = "";
+    private static final String ACCOUNTKEY = "";
 
     /**
      * 计算 token、timestamp、rand 的 sha1 值
@@ -73,26 +89,108 @@ public class SignUtil {
 
     /**
      * 设置系统级 headers
-     * @param appKey
-     * @param signString
-     * @param headerKeys
+     * @param namespace
      * @return
      */
-    public static Map<String,Object> systemHeaders(String appKey, String signString, List<String> headerKeys){
+    public static Map<String,Object> systemHeaders(String namespace){
         Map<String,Object>  systemHeaders = new HashMap<>();
-        if (StringUtils.isBlank(appKey) || StringUtils.isBlank(signString) || CollectionUtils.isEmpty(headerKeys)){
+        if (StringUtils.isBlank(namespace)){
             return systemHeaders;
         }
-        StringJoiner sj = new StringJoiner(",");
-        headerKeys.forEach(sj::add);
-        systemHeaders.put("X-Ca-Key",appKey);
-        // 不参与 headers 签名计算
-        systemHeaders.put("X-Ca-Signature",signString);
-        // 不参与 headers 签名计算
-        systemHeaders.put("X-Ca-Signature-Headers",sj.toString());
-        // 时间戳与 uuid 一起防重放
-        systemHeaders.put("X-Ca-Timestamp", System.currentTimeMillis());
+        String curTime = System.currentTimeMillis() / 1000 + "";
+        // aiui开放平台的命名空间，在「技能工作室-我的实体-动态实体密钥」中查看
+        systemHeaders.put("X-NameSpace",namespace);
+        // 随机数（最大长度128个字符）
         systemHeaders.put("X-Ca-Nonce",UUID.randomUUID().toString().replace("-",""));
+        // 当前UTC时间戳，从1970年1月1日0点0 分0 秒开始到现在的秒数(String)
+        systemHeaders.put("X-CurTime", curTime);
+        // MD5(accountKey + Nonce + CurTime),三个参数拼接的字符串，进行MD5哈希计算
+        systemHeaders.put("X-CheckSum", System.currentTimeMillis());
+
         return systemHeaders;
+    }
+
+
+    /**
+     * 生成握手参数
+     * @param appId
+     * @param secretKey
+     * @return
+     */
+    public static String getHandShakeParams(String appId, String secretKey) {
+        String ts = System.currentTimeMillis()/1000 + "";
+        String signa = "";
+        try {
+            signa = EncryptUtil.HmacSHA1Encrypt(EncryptUtil.MD5(appId + ts), secretKey);
+            return "?appid=" + appId + "&ts=" + ts + "&signa=" + URLEncoder.encode(signa, "UTF-8");
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        return "";
+    }
+
+    /**
+     * 检验signature方法
+     * 用于签名验证
+     * <p>
+     * 加密/校验流程如下：
+     * 1. 将参数值args集合进行字典序排序
+     * 2. 参数字符串拼接成一个字符串进行sha1加密
+     * 3. 开发者获得加密后的字符串可与signature对比，标识该请求来源于AIUI服务
+     *
+     * @param signature 签名
+     * @param args      参数列表
+     *                  # token: 开放平台token值
+     *                  # rand: 随机数
+     *                  # timestamp: 时间戳
+     *                  # data: request body
+     * @return boolean of check result
+     */
+    public static Boolean checkSignature(String signature, String... args){
+        // 将参数值进行字典序排序
+        List<String> signList = new ArrayList<>();
+        Collections.addAll(signList, args);
+        Collections.sort(signList);
+        String sign = signList.stream().map(String::valueOf).collect(Collectors.joining());
+        String tmpStr = SecureUtil.sha1(sign);
+        // 加密后的字符串与 signature 对比
+        return signature != null && signature.equals(tmpStr);
+    }
+
+    /**
+     * 检验 signature 方法
+     * 用于签名验证
+     * <p>
+     * 签名验证流程:
+     * 1. 对 Signature的值进行 Base64-decode,得到 decoded_signature
+     * 2. 使用 SHA-1 摘要算法（十六进制编码）对请求 Body 生成 hash
+     * 3. 使用 RSA 算法, 使用公钥 public_key 对 decoded_signature,hash 进行校验，摘要类型为 sha256
+     *
+     * @param publicKey 签名公钥
+     * @param signature 签名
+     * @param body      请求Body
+     * @return boolean of check result
+     */
+    public static Boolean checkPublicKeySignature(String publicKey, String signature, String body) {
+        // 对Signature的值进行Base64-decode
+        byte[] decodedSignature = Base64.decodeBase64(signature);
+
+        // 对请求Body生成hash
+        String hash = SecureUtil.sha1(body);
+
+        // 使用公钥public_key对decoded_signature,hash进行校验（SHA256withRSA）
+        try {
+            KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+            byte[] encodedKey = Base64.decodeBase64(publicKey);
+            PublicKey pubKey = keyFactory.generatePublic(new X509EncodedKeySpec(encodedKey));
+            Signature sign = Signature.getInstance("SHA256withRSA");
+            sign.initVerify(pubKey);
+            sign.update(hash.getBytes(StandardCharsets.UTF_8));
+            return sign.verify(decodedSignature);
+        } catch (InvalidKeyException | NoSuchAlgorithmException | SignatureException | InvalidKeySpecException e) {
+            e.printStackTrace();
+            return false;
+        }
     }
 }

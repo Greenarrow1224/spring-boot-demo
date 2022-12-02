@@ -1,2 +1,9 @@
 server:
   port: 7898
+
+xunfei:
+  aiui:
+    token: c5f8ccdc5b9a9454
+    public-key: xxxx
+  openapi:
+    url: https://openapi.xfyun.cn
